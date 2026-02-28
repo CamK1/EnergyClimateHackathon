@@ -154,7 +154,7 @@ async def get_energy_day(date: str):
 
     # ── Validate required columns exist (same pattern as your other endpoints) ──
     required = [
-        "Demand", "Demand forecast",
+        "Hour", "Demand", "Demand forecast",
         "Adjusted COL Gen", "Adjusted NG Gen", "Adjusted NUC Gen",
         "Adjusted SUN Gen", "Adjusted WND Gen", "Adjusted WAT Gen", "Adjusted GEO Gen"
     ]
@@ -167,6 +167,7 @@ async def get_energy_day(date: str):
     # row. If it has 24 rows per day (hourly), it will return all 24.
     hours = []
     for i, row in day_df.iterrows():
+        hour_num = int(row["Hour"]) % 24
         col_gen  = float(row["Adjusted COL Gen"])
         ng_gen   = float(row["Adjusted NG Gen"])
         nuc_gen  = float(row["Adjusted NUC Gen"])
@@ -183,8 +184,8 @@ async def get_energy_day(date: str):
         savings        = demand - optimal_demand
 
         hours.append({
-            "hour":          f"{str(i).zfill(2)}:00",
-            "h":             i,
+            "hour": f"{str(hour_num).zfill(2)}:00",
+            "h":    hour_num,
             "demand":        round(demand, 2),
             "optimalDemand": round(optimal_demand, 2),
             "savings":       round(savings, 2),
