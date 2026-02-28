@@ -38,6 +38,8 @@ def load_data():
     df['Local date'] = pd.to_datetime(df['Local date'], format='%d%b%Y')
 
     columns_to_clean = [
+        "Demand",
+        "Demand forecast",
         "Adjusted COL Gen",
         "Adjusted NG Gen",
         "Adjusted NUC Gen",
@@ -83,6 +85,7 @@ def load_data():
     df[existing_columns] = (
         df[existing_columns]
         .replace(r'^\s*$', pd.NA, regex=True)
+        .apply(lambda col: col.astype(str).str.replace(",", "", regex=False))
         .apply(pd.to_numeric, errors='coerce')
         .fillna(0)
         .astype(float)
@@ -136,28 +139,34 @@ async def get_energy_day(date: str):
     if df is None:
         raise HTTPException(status_code=500, detail="Dataframe not loaded")
 
-    start = f"{date} 00:00:00"
-    end   = f"{date} 23:59:59"
-    day_df = filter_time_range(start, end)
-    day_df = day_df.sort_values("Datetime").reset_index(drop=True)
+    # Filter by Local date (the column we know exists and is already parsed)
+    try:
+        target_date = pd.to_datetime(date)
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid date format. Use YYYY-MM-DD")
 
-    # Validate the columns we need actually exist in the CSV
-    required_columns = ["Demand", "Demand forecast", "Adjusted COL Gen",
-                        "Adjusted NG Gen", "Adjusted NUC Gen", "Adjusted SUN Gen",
-                        "Adjusted WND Gen", "Adjusted WAT Gen", "Adjusted GEO Gen"]
-    missing = [col for col in required_columns if col not in day_df.columns]
+    day_df = df[df["Local date"] == target_date].copy()
+
+    if day_df.empty:
+        raise HTTPException(status_code=404, detail=f"No data found for {date}")
+
+    day_df = day_df.reset_index(drop=True)
+
+    # ── Validate required columns exist (same pattern as your other endpoints) ──
+    required = [
+        "Demand", "Demand forecast",
+        "Adjusted COL Gen", "Adjusted NG Gen", "Adjusted NUC Gen",
+        "Adjusted SUN Gen", "Adjusted WND Gen", "Adjusted WAT Gen", "Adjusted GEO Gen"
+    ]
+    missing = [col for col in required if col not in day_df.columns]
     if missing:
         raise HTTPException(status_code=400, detail=f"Missing columns in CSV: {missing}")
 
+    # ── Build hourly rows ─────────────────────────────────────────────────────
+    # If your CSV has one row per day (not per hour), this will return a single
+    # row. If it has 24 rows per day (hourly), it will return all 24.
     hours = []
-    for _, row in day_df.iterrows():
-        hour_num = pd.to_datetime(row["Datetime"]).hour
-
-        # ── Read directly from dataframe ──────────────────────────────────────
-        demand         = float(row["Demand"])
-        optimal_demand = float(row["Demand forecast"])
-        savings        = demand - optimal_demand
-
+    for i, row in day_df.iterrows():
         col_gen  = float(row["Adjusted COL Gen"])
         ng_gen   = float(row["Adjusted NG Gen"])
         nuc_gen  = float(row["Adjusted NUC Gen"])
@@ -167,18 +176,15 @@ async def get_energy_day(date: str):
         geo_gen  = float(row["Adjusted GEO Gen"])
 
         total_gen = col_gen + ng_gen + nuc_gen + sun_gen + wnd_gen + wat_gen + geo_gen
-        total_gen = total_gen if total_gen > 0 else 1  # avoid division by zero
+        total_gen = total_gen if total_gen > 0 else 1
 
-        # ── LCOE costs — NOT in the EIA CSV, sourced from Lazard LCOE+ data ──
-        # These stay as constants until you have a per-hour cost data source.
-        LCOE_COSTS = {
-            "coal": 42, "natural_gas": 52, "nuclear": 22,
-            "solar": 18, "wind": 15, "hydro": 12, "geothermal": 88,
-        }
+        demand         = float(row["Demand"])
+        optimal_demand = float(row["Demand forecast"])
+        savings        = demand - optimal_demand
 
         hours.append({
-            "hour":          f"{str(hour_num).zfill(2)}:00",
-            "h":             hour_num,
+            "hour":          f"{str(i).zfill(2)}:00",
+            "h":             i,
             "demand":        round(demand, 2),
             "optimalDemand": round(optimal_demand, 2),
             "savings":       round(savings, 2),
@@ -191,13 +197,8 @@ async def get_energy_day(date: str):
             "hydro_pct":       round(wat_gen  / total_gen * 100, 1),
             "geothermal_pct":  round(geo_gen  / total_gen * 100, 1),
             # Costs — Lazard LCOE constants, no equivalent column in EIA CSV
-            "coal_cost":        LCOE_COSTS["coal"],
-            "natural_gas_cost": LCOE_COSTS["natural_gas"],
-            "nuclear_cost":     LCOE_COSTS["nuclear"],
-            "solar_cost":       LCOE_COSTS["solar"],
-            "wind_cost":        LCOE_COSTS["wind"],
-            "hydro_cost":       LCOE_COSTS["hydro"],
-            "geothermal_cost":  LCOE_COSTS["geothermal"],
+            "coal_cost": 42, "natural_gas_cost": 52, "nuclear_cost": 22,
+            "solar_cost": 18, "wind_cost": 15, "hydro_cost": 12, "geothermal_cost": 88,
         })
 
     energy_keys = ["coal", "natural_gas", "nuclear", "solar", "wind", "hydro", "geothermal"]
@@ -211,6 +212,11 @@ async def get_energy_day(date: str):
         "avgMix": avg_mix,
     }
 
+@app.get("/api/debug/columns")
+async def debug_columns():
+    if df is None:
+        raise HTTPException(status_code=500, detail="Dataframe not loaded")
+    return {"columns": df.columns.tolist(), "shape": df.shape}
 # ─────────────────────────────────────────────────────────────────────────────
 # EXISTING ENDPOINTS (unchanged)
 # ─────────────────────────────────────────────────────────────────────────────
