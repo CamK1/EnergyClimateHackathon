@@ -1,12 +1,14 @@
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+import pandas as pd
+from pathlib import Path
 
 app = FastAPI()
 
 # Allow your React frontend to talk to this backend
 origins = [
-    "http://localhost:3000",  # common React dev server
-    "http://localhost:5173",  # common Vite dev server
+    "http://localhost:3000",  # React
+    "http://localhost:5173",  # Vite
 ]
 
 app.add_middleware(
@@ -17,16 +19,294 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Path to your CSV file
+CSV_FILE = Path("..\\PACE.csv")
+
+# Global dataframe variable
+df = None
+
+#Note we can change year span. general df that we run stuff on.
+def load_data():
+    global df
+
+    if not CSV_FILE.exists():
+        raise FileNotFoundError(f"CSV file not found: {CSV_FILE}")
+
+    df = pd.read_csv(CSV_FILE, low_memory=False)
+    df.columns = df.columns.str.strip()
+
+    df['Local date'] = pd.to_datetime(df['Local date'], format='%d%b%Y')
+
+    columns_to_clean = [
+        "Adjusted COL Gen",
+        "Adjusted NG Gen",
+        "Adjusted NUC Gen",
+        "Adjusted OIL Gen",
+        "Adjusted GEO Gen",
+        "Adjusted WAT Gen",
+        "Adjusted PS Gen",
+        "Adjusted SUN Gen",
+        "Adjusted SNB Gen",
+        "Adjusted WND Gen",
+        "Adjusted WNB Gen",
+        "Adjusted BAT Gen",
+        "Adjusted OES Gen",
+        "Adjusted UES Gen",
+        "Adjusted OTH Gen",
+        "Adjusted UNK Gen",
+        "AZPS",
+        "IPCO",
+        "LDWP",
+        "NEVP",
+        "NWMT",
+        "PACW",
+        "WACM",
+        "CO2 Factor: COL",
+        "CO2 Factor: NG",
+        "CO2 Factor: OIL",
+        "CO2 Emissions: COL",
+        "CO2 Emissions: NG",
+        "CO2 Emissions: OIL",
+        "CO2 Emissions: Other",
+        "CO2 Emissions Generated",
+        "CO2 Emissions Imported",
+        "CO2 Emissions Exported",
+        "CO2 Emissions Consumed",
+        "Positive Generation",
+        "Consumed Electricity",
+        "CO2 Emissions Intensity for Generated Electricity",
+        "CO2 Emissions Intensity for Consumed Electricity"
+    ]
+
+    existing_columns = [col for col in columns_to_clean if col in df.columns]
+
+    df[existing_columns] = (
+        df[existing_columns]
+        .replace(r'^\s*$', pd.NA, regex=True)
+        .apply(pd.to_numeric, errors='coerce')
+        .fillna(0)
+        .astype(float)
+    )
+
+    cutoff = pd.Timestamp.today().normalize() - pd.Timedelta(days=3)
+    pace_recent = df[
+        (df['Local date'].dt.year >= 2022) &
+        (df['Local date'] < cutoff)
+    ]
+
+#load data
+@app.on_event("startup")
+def startup_event():
+    load_data()
+
+def filter_time_range(start: str, end: str) -> pd.DataFrame:
+    """
+    Filters the global dataframe between start and end datetime strings.
+    """
+    if df is None:
+        raise HTTPException(status_code=500, detail="Dataframe not loaded")
+
+    try:
+        start_dt = pd.to_datetime(start)
+        end_dt = pd.to_datetime(end)
+    except Exception:
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid datetime format. Use something like 2025-01-01 00:00:00"
+        )
+
+    filtered_df = df[(df["Datetime"] >= start_dt) & (df["Datetime"] <= end_dt)].copy()
+
+    if filtered_df.empty:
+        raise HTTPException(status_code=404, detail="No data found in that time range")
+
+    return filtered_df
+
+#/api/peak-demand?start=2025-01-01 00:00:00&end=2025-01-01 23:59:59 as an example of calling this api
+@app.get("/api/peak-demand")
+async def get_peak_demand(start: str, end: str):
+    filtered_df = filter_time_range(start, end)
+
+    if "Demand" not in filtered_df.columns:
+        raise HTTPException(status_code=400, detail="Column 'Demand' not found in CSV")
+
+    max_index = filtered_df["Demand"].idxmax()
+    max_row = filtered_df.loc[max_index]
+
+    return {
+        "start": start,
+        "end": end,
+        "peak_demand": float(max_row["Demand"]),
+        "peak_time": str(max_row["Datetime"]),
+        "peak_hour": pd.to_datetime(max_row["Datetime"]).hour
+    }
+
+@app.get("/api/avg-demand")
+async def get_average_demand(start: str, end: str):
+    filtered_df = filter_time_range(start, end)
+
+    if "Demand" not in filtered_df.columns:
+        raise HTTPException(status_code=400, detail="Column 'Demand' not found in CSV")
+
+    avg_demand = filtered_df["Demand"].mean()
+
+    return {
+        "start": start,
+        "end": end,
+        "average_demand": float(avg_demand)
+    }
+
+#
+@app.get("/api/demand-forecast")    
+async def get_demand_forecast(start: str, end: str):
+    filtered_df = filter_time_range(start, end)
+
+    if "Demand forecast" not in filtered_df.columns:
+        raise HTTPException(status_code=400, detail="Column 'Demand forecast' not found in CSV")
+
+    forecast_df = filtered_df[["Datetime", "Demand forecast"]].copy()
+
+    return {
+        "start": start,
+        "end": end,
+        "count": len(forecast_df),
+        "values": forecast_df.to_dict(orient="records")
+    }
+
+#
+
+@app.get("/api/co2-data")
+async def get_co2_data(start: str, end: str):
+    filtered_df = filter_time_range(start, end)
+
+    wanted_columns = [
+        "Datetime",
+        "CO2 Factor: COL",
+        "CO2 Factor: NG",
+        "CO2 Factor: OIL",
+        "CO2 Emissions: COL",
+        "CO2 Emissions: NG",
+        "CO2 Emissions: Other"
+    ]
+
+    missing_columns = [col for col in wanted_columns if col not in filtered_df.columns]
+    if missing_columns:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Missing columns in CSV: {missing_columns}"
+        )
+
+    co2_df = filtered_df[wanted_columns].copy()
+
+    return {
+        "start": start,
+        "end": end,
+        "count": len(co2_df),
+        "values": co2_df.to_dict(orient="records")
+    }
+
+@app.get("/api/adjusted-generation")
+async def get_adjusted_generation(start: str, end: str):
+    filtered_df = filter_time_range(start, end)
+
+    wanted_columns = [
+        "Datetime",
+        "Adjusted NG Gen",
+        "Adjusted NUC Gen",
+        "Adjusted OIL Gen",
+        "Adjusted GEO Gen",
+        "Adjusted WAT Gen",
+        "Adjusted PS Gen",
+        "Adjusted SUN Gen",
+        "Adjusted SNB Gen",
+        "Adjusted WND Gen",
+        "Adjusted WNB Gen",
+        "Adjusted BAT Gen",
+        "Adjusted OES Gen",
+        "Adjusted UES Gen",
+        "Adjusted OTH Gen",
+        "Adjusted UNK Gen"
+    ]
+
+    missing_columns = [col for col in wanted_columns if col not in filtered_df.columns]
+    if missing_columns:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Missing columns in CSV: {missing_columns}"
+        )
+
+    generation_df = filtered_df[wanted_columns].copy()
+
+    return {
+        "start": start,
+        "end": end,
+        "count": len(generation_df),
+        "values": generation_df.to_dict(orient="records")
+    }
+
+#Projection
+
+
+#TESTING
 @app.get("/")
 async def root():
     return {"message": "FastAPI backend is running"}
+
 
 @app.get("/api/hello")
 async def hello():
     return {"message": "Hello from FastAPI"}
 
-@app.post("/api/add")
-async def add_numbers(data: dict):
-    a = data.get("a", 0)
-    b = data.get("b", 0)
-    return {"result": a + b}
+#TEMPLATE
+
+@app.get("/api/data")
+async def get_data():
+    if df is None:
+        raise HTTPException(status_code=500, detail="Dataframe not loaded")
+
+    # Return first 10 rows
+    return df.head(10).to_dict(orient="records")
+
+
+@app.get("/api/columns")
+async def get_columns():
+    if df is None:
+        raise HTTPException(status_code=500, detail="Dataframe not loaded")
+
+    return {"columns": df.columns.tolist()}
+
+
+@app.get("/api/summary")
+async def get_summary():
+    if df is None:
+        raise HTTPException(status_code=500, detail="Dataframe not loaded")
+
+    summary = {
+        "row_count": len(df),
+        "column_count": len(df.columns),
+        "columns": df.columns.tolist()
+    }
+
+    return summary
+
+
+@app.get("/api/filter")
+async def filter_data(column: str, value: str):
+    if df is None:
+        raise HTTPException(status_code=500, detail="Dataframe not loaded")
+
+    if column not in df.columns:
+        raise HTTPException(status_code=400, detail=f"Column '{column}' not found")
+
+    filtered_df = df[df[column].astype(str) == value]
+
+    return filtered_df.to_dict(orient="records")
+
+
+@app.post("/api/reload")
+async def reload_data():
+    try:
+        load_data()
+        return {"message": "CSV reloaded successfully"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
