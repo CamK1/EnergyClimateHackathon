@@ -49,7 +49,7 @@ const DemandTooltip = ({ active, payload, label }: TooltipProps) => {
         <p style={{ color: colors.actual, fontSize: font.lg, margin: "4px 0" }}>
           Actual:{" "}
           <span style={{ color: colors.textPrimary }}>
-            {(actual.value as number).toLocaleString()} KW
+            {(actual.value as number).toLocaleString()} MW
           </span>
         </p>
       )}
@@ -59,7 +59,7 @@ const DemandTooltip = ({ active, payload, label }: TooltipProps) => {
         >
           Optimal:{" "}
           <span style={{ color: colors.textPrimary }}>
-            {(optimal.value as number).toLocaleString()} KW
+            {(optimal.value as number).toLocaleString()} MW
           </span>
         </p>
       )}
@@ -73,7 +73,7 @@ const DemandTooltip = ({ active, payload, label }: TooltipProps) => {
             paddingTop: spacing.xs,
           }}
         >
-          ↓ {gap.toLocaleString()} KW reducible
+          ↓ {gap.toLocaleString()} MW reducible
         </p>
       )}
     </div>
@@ -185,7 +185,7 @@ export default function DemandChart({
             }}
             tickLine={false}
             axisLine={false}
-            unit=" KW"
+            unit=" MW"
             width={70}
           />
           <Tooltip content={<DemandTooltip />} />
@@ -252,7 +252,7 @@ export default function DemandChart({
         </span>
         <span style={{ fontSize: font.sm, color: colors.optimal }}>
           ↓ <strong>{avgSavingsPct}%</strong> avg reduction ·{" "}
-          <strong>{totalSavings.toLocaleString()}</strong> KW·h reducible today
+          <strong>{totalSavings.toLocaleString()}</strong> MW·h reducible today
         </span>
       </div>
     </ChartCard>

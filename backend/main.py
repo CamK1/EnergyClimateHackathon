@@ -25,7 +25,7 @@ CSV_FILE = Path("..\\PACE.csv")
 # Global dataframe variable
 df = None
 
-#Note we can change year span. general df that we run stuff on.
+# Note we can change year span. general df that we run stuff on.
 def load_data():
     global df
 
@@ -94,7 +94,7 @@ def load_data():
         (df['Local date'] < cutoff)
     ]
 
-#load data
+# Load data on startup
 @app.on_event("startup")
 def startup_event():
     load_data()
@@ -122,7 +122,100 @@ def filter_time_range(start: str, end: str) -> pd.DataFrame:
 
     return filtered_df
 
-#/api/peak-demand?start=2025-01-01 00:00:00&end=2025-01-01 23:59:59 as an example of calling this api
+
+# ─────────────────────────────────────────────────────────────────────────────
+# PRIMARY ENDPOINT — used by EnergyDashboard.tsx
+# Returns the full DayData shape the frontend expects (hours + avgMix).
+# Weather is intentionally excluded — the frontend fetches it separately
+# via weatherApi.ts → open-meteo.
+#
+# Example: GET /api/energy/2025-01-15
+# ─────────────────────────────────────────────────────────────────────────────
+@app.get("/api/energy/{date}")
+async def get_energy_day(date: str):
+    if df is None:
+        raise HTTPException(status_code=500, detail="Dataframe not loaded")
+
+    start = f"{date} 00:00:00"
+    end   = f"{date} 23:59:59"
+    day_df = filter_time_range(start, end)
+    day_df = day_df.sort_values("Datetime").reset_index(drop=True)
+
+    # Validate the columns we need actually exist in the CSV
+    required_columns = ["Demand", "Demand forecast", "Adjusted COL Gen",
+                        "Adjusted NG Gen", "Adjusted NUC Gen", "Adjusted SUN Gen",
+                        "Adjusted WND Gen", "Adjusted WAT Gen", "Adjusted GEO Gen"]
+    missing = [col for col in required_columns if col not in day_df.columns]
+    if missing:
+        raise HTTPException(status_code=400, detail=f"Missing columns in CSV: {missing}")
+
+    hours = []
+    for _, row in day_df.iterrows():
+        hour_num = pd.to_datetime(row["Datetime"]).hour
+
+        # ── Read directly from dataframe ──────────────────────────────────────
+        demand         = float(row["Demand"])
+        optimal_demand = float(row["Demand forecast"])
+        savings        = demand - optimal_demand
+
+        col_gen  = float(row["Adjusted COL Gen"])
+        ng_gen   = float(row["Adjusted NG Gen"])
+        nuc_gen  = float(row["Adjusted NUC Gen"])
+        sun_gen  = float(row["Adjusted SUN Gen"])
+        wnd_gen  = float(row["Adjusted WND Gen"])
+        wat_gen  = float(row["Adjusted WAT Gen"])
+        geo_gen  = float(row["Adjusted GEO Gen"])
+
+        total_gen = col_gen + ng_gen + nuc_gen + sun_gen + wnd_gen + wat_gen + geo_gen
+        total_gen = total_gen if total_gen > 0 else 1  # avoid division by zero
+
+        # ── LCOE costs — NOT in the EIA CSV, sourced from Lazard LCOE+ data ──
+        # These stay as constants until you have a per-hour cost data source.
+        LCOE_COSTS = {
+            "coal": 42, "natural_gas": 52, "nuclear": 22,
+            "solar": 18, "wind": 15, "hydro": 12, "geothermal": 88,
+        }
+
+        hours.append({
+            "hour":          f"{str(hour_num).zfill(2)}:00",
+            "h":             hour_num,
+            "demand":        round(demand, 2),
+            "optimalDemand": round(optimal_demand, 2),
+            "savings":       round(savings, 2),
+            # Mix percentages — read from dataframe
+            "coal_pct":        round(col_gen  / total_gen * 100, 1),
+            "natural_gas_pct": round(ng_gen   / total_gen * 100, 1),
+            "nuclear_pct":     round(nuc_gen  / total_gen * 100, 1),
+            "solar_pct":       round(sun_gen  / total_gen * 100, 1),
+            "wind_pct":        round(wnd_gen  / total_gen * 100, 1),
+            "hydro_pct":       round(wat_gen  / total_gen * 100, 1),
+            "geothermal_pct":  round(geo_gen  / total_gen * 100, 1),
+            # Costs — Lazard LCOE constants, no equivalent column in EIA CSV
+            "coal_cost":        LCOE_COSTS["coal"],
+            "natural_gas_cost": LCOE_COSTS["natural_gas"],
+            "nuclear_cost":     LCOE_COSTS["nuclear"],
+            "solar_cost":       LCOE_COSTS["solar"],
+            "wind_cost":        LCOE_COSTS["wind"],
+            "hydro_cost":       LCOE_COSTS["hydro"],
+            "geothermal_cost":  LCOE_COSTS["geothermal"],
+        })
+
+    energy_keys = ["coal", "natural_gas", "nuclear", "solar", "wind", "hydro", "geothermal"]
+    avg_mix = {
+        k: round(sum(h[f"{k}_pct"] for h in hours) / max(len(hours), 1), 1)
+        for k in energy_keys
+    }
+
+    return {
+        "hours":  hours,
+        "avgMix": avg_mix,
+    }
+
+# ─────────────────────────────────────────────────────────────────────────────
+# EXISTING ENDPOINTS (unchanged)
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Example: /api/peak-demand?start=2025-01-01 00:00:00&end=2025-01-01 23:59:59
 @app.get("/api/peak-demand")
 async def get_peak_demand(start: str, end: str):
     filtered_df = filter_time_range(start, end)
@@ -141,6 +234,7 @@ async def get_peak_demand(start: str, end: str):
         "peak_hour": pd.to_datetime(max_row["Datetime"]).hour
     }
 
+
 @app.get("/api/avg-demand")
 async def get_average_demand(start: str, end: str):
     filtered_df = filter_time_range(start, end)
@@ -156,8 +250,8 @@ async def get_average_demand(start: str, end: str):
         "average_demand": float(avg_demand)
     }
 
-#
-@app.get("/api/demand-forecast")    
+
+@app.get("/api/demand-forecast")
 async def get_demand_forecast(start: str, end: str):
     filtered_df = filter_time_range(start, end)
 
@@ -173,7 +267,6 @@ async def get_demand_forecast(start: str, end: str):
         "values": forecast_df.to_dict(orient="records")
     }
 
-#
 
 @app.get("/api/co2-data")
 async def get_co2_data(start: str, end: str):
@@ -204,6 +297,7 @@ async def get_co2_data(start: str, end: str):
         "count": len(co2_df),
         "values": co2_df.to_dict(orient="records")
     }
+
 
 @app.get("/api/adjusted-generation")
 async def get_adjusted_generation(start: str, end: str):
@@ -244,10 +338,11 @@ async def get_adjusted_generation(start: str, end: str):
         "values": generation_df.to_dict(orient="records")
     }
 
-#Projection
 
+# ─────────────────────────────────────────────────────────────────────────────
+# TESTING / TEMPLATE ENDPOINTS
+# ─────────────────────────────────────────────────────────────────────────────
 
-#TESTING
 @app.get("/")
 async def root():
     return {"message": "FastAPI backend is running"}
@@ -257,14 +352,12 @@ async def root():
 async def hello():
     return {"message": "Hello from FastAPI"}
 
-#TEMPLATE
 
 @app.get("/api/data")
 async def get_data():
     if df is None:
         raise HTTPException(status_code=500, detail="Dataframe not loaded")
 
-    # Return first 10 rows
     return df.head(10).to_dict(orient="records")
 
 
